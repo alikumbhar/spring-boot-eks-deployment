@@ -1,0 +1,57 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: spring-boot-eks-alerts
+  namespace: monitoring
+  labels:
+    role: alert-rules
+spec:
+  groups:
+    - name: eks-cluster
+      rules:
+        - alert: HighNodeCPU
+          expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "EKS Node CPU usage high"
+            description: "Node {{ $labels.instance }} CPU utilization is {{ $value }}% (>85% threshold)."
+
+        - alert: PodCrashLoop
+          expr: rate(kube_pod_container_status_restarts_total[5m]) * 60 > 2
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Pod in CrashLoopBackOff"
+            description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} is restarting repeatedly."
+
+        - alert: KubeAPIHighLatency
+          expr: histogram_quantile(0.99, rate(apiserver_request_duration_seconds_bucket[5m])) > 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Kubernetes API high latency"
+            description: "Kubernetes API latency is above 1 second for the 99th percentile."
+
+    - name: application
+      rules:
+        - alert: AppLatencyHigh
+          expr: histogram_quantile(0.95, rate(http_server_requests_seconds_bucket[5m])) > 2
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Application high latency"
+            description: "Spring Boot app 95th percentile latency is above 2s over 5m."
+
+        - alert: AppErrorRateHigh
+          expr: sum(rate(http_server_requests_seconds_count{status=~"5.."}[5m])) / sum(rate(http_server_requests_seconds_count[5m])) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "High HTTP 5xx error rate"
+            description: "HTTP 5xx error rate is {{ $value | humanizePercentage }} (threshold 5%)."
