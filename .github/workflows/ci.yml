@@ -11,16 +11,17 @@ permissions:
   id-token: write  # needed for OIDC auth to AWS
 
 env:
-  REGISTRY: public.ecr.aws
-  IMAGE_TAG: "${{ github.sha }}"
-  ECS_CLUSTER: "spring-boot-eks"
-  DEPLOY_ENV: "prod"
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: public.ecr.aws
+  ECR_REPOSITORY: spring-boot-app
+  ECS_CLUSTER: spring-boot-eks
+  KUBE_NAMESPACE: default
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      id-token: "full"  # needed for OIDC auth
+      id-token: "full"
       contents: read
 
     steps:
@@ -40,37 +41,38 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-arm-arn: arn:aws:iam::${AWS_ACCOUNT_ID}:role/${{ env.ECS_CLUSTER }}-ecs-exec-role
-          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ env.ECS_CLUSTER }}-github-actions
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR Public
         id: ecr-login
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@v1
         with:
-          mask-password: false
+          mask-password: true
           registry-type: public
 
       - name: Build and push Docker image
         id: docker-build
         run: |
-          IMAGE_URI="${{ env.REGISTRY }}/${{ env.ECS_CLUSTER }}/spring-boot-app:${{ env.IMAGE_TAG }}"
+          IMAGE_URI="${{ env.ECR_REGISTRY }}/${{ secrets.AWS_ACCOUNT_ID }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
           echo "Image URI: $IMAGE_URI"
           docker build -t $IMAGE_URI .
           docker push $IMAGE_URI
           echo "image=$IMAGE_URI" >> $GITHUB_OUTPUT
 
       - name: Update kubeconfig
-        uses: azure/actions-setup-kubectl@v3
-        with:
-          version: '1.31.0'
-
-      - name: Update kubeconfig for cluster
         run: |
-          aws eks update-kubeconfig --region us-east-1 --name ${{ env.ECS_CLUSTER }}
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.ECS_CLUSTER }}
 
-      - name: Deploy to EKS with ArgoCD
+      - name: Deploy manifests to EKS
         run: |
-          kubectl apply -k .
+          kubectl apply -f k8s/ -n ${{ env.KUBE_NAMESPACE }}
+          kubectl rollout status deployment/taskmgmt-api -n ${{ env.KUBE_NAMESPACE }} --timeout=120s
+
+      - name: Verify deployment health
+        run: |
+          kubectl get pods -l app=taskmgmt-api -n ${{ env.KUBE_NAMESPACE }}
+          kubectl get svc taskmgmt-api -n ${{ env.KUBE_NAMESPACE }}
 
   deploy:
     needs: build-and-push
@@ -85,15 +87,19 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-arm-arn: arn:aws:iam::${AWS_ACCOUNT_ID}:role/${{ env.ECS_CLUSTER }}-ecs-exec-role
-          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ env.ECS_CLUSTER }}-github-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.ECS_CLUSTER }}
 
       - name: Deploy manifests to EKS
         run: |
-          kubectl apply -f k8s/
-          kubectl rollout status deployment/taskmgmt-api -n default --timeout=120s
+          kubectl apply -f k8s/ -n ${{ env.KUBE_NAMESPACE }}
+          kubectl rollout status deployment/taskmgmt-api -n ${{ env.KUBE_NAMESPACE }} --timeout=120s
 
       - name: Verify deployment health
         run: |
-          kubectl get pods -l app=taskmgmt-api
-          kubectl get svc taskmgmt-api
+          kubectl get pods -l app=taskmgmt-api -n ${{ env.KUBE_NAMESPACE }}
+          kubectl get svc taskmgmt-api -n ${{ env.KUBE_NAMESPACE }}
